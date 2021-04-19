@@ -1,0 +1,232 @@
+---
+title: "final_proj"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, message = FALSE}
+library(data.table)
+
+library(sandwich)
+library(lmtest)
+
+library(AER) 
+
+library(ggplot2) 
+library(dplyr)
+library(patchwork)
+library(forcats)
+
+library(stargazer)
+
+#install.packages("jtools")
+library(jtools)
+
+#install.packages("pivottabler")
+library(pivottabler)
+
+#install.packages("pwr")
+library(pwr)
+```
+
+```{r}
+d <- fread('~/Omnibus Xlab Experiment_April 14, 2021_14.33.csv', na.strings=c('\"\"',"","NA"), header=TRUE, drop=c("RecordedDate"))
+
+NewNames <- c("employment", "political_party", "degree",
+              "race", "country", "gender", "birthyear",
+              "living", "infected", "social", "treatment1", "treatment2",
+              "discrimination", "sympathy", "targeted", "salary")
+names(d) <- NewNames
+
+d <- d[d$country == 'United States of America',]
+d$assigned <- ifelse(is.na(d$treatment1), "Control", "Treatment")
+d <- d[!is.na(d$targeted),]
+d <- d[d$race != "Prefer not to answer"]
+
+d$targeted <- as.numeric(factor(d$targeted, levels=c("Strongly disagree","Somewhat disagree", "Neither agree nor disagree", "Somewhat agree", "Strongly agree")))
+d
+```
+# Pre-Experiement Power Calculation
+
+```{r}
+# Guessed our treatment effect was medium
+# Use the effect size in the power calc below
+
+cohen.ES(test = "t", size = "medium")
+```
+
+```{r}
+# Screenshot
+power.t.test(n = 100, delta = 0.5, sd = 1, sig.level = 0.05)
+```
+
+# Main Experiment - ITT Calculation
+
+```{r}
+# Screenshot
+# Calculate ITT and p-value
+
+base_model <- lm(targeted~assigned, data=d)
+get_robust_se(base_model)
+```
+
+```{r}
+# Calculate 95% CI
+stddev <- get_robust_se(base_model)$se[2]
+n <- nrow(d)
+error <- qnorm(0.975)*stddev/sqrt(n)
+
+c(base_model$coefficients[2]-error, base_model$coefficients[2]+error)
+```
+
+
+```{r}
+d %>% group_by(assigned, targeted) %>%
+  summarise(count = n(), .groups = "keep") %>% 
+  ggplot(aes(x = targeted, y = count, fill=assigned)) + 
+  geom_col(position = "dodge") +
+  xlab("Outcome Variable") +
+  ylab("Count") +
+  labs(title = "Distribution of Outcome Variable") +
+  scale_fill_discrete(name = "Assignment")
+```
+
+# EDA
+
+```{r}
+pt <- PivotTable$new()
+pt$addData(d)
+pt$addColumnDataGroups("race")
+pt$addRowDataGroups("assigned")
+pt$addRowDataGroups("infected")
+pt$defineCalculation(calculationName="Count", summariseExpression="n()")
+pt$renderPivot()
+```
+
+```{r}
+# Aggregate the Black or African American, Native American, and Native Hawaiian or Pacific Islander under Other
+
+d$agg_race <- ifelse(d$race=="Asian", "Asian", 
+                  ifelse(d$race=="Non-Hispanic White", "Non-Hispanic White", 
+                         ifelse(d$race=="Hispanic or Latino", "Hispanic or Latino", "Other")))
+```
+
+```{r}
+# Screenshot
+
+pt2 <- PivotTable$new()
+pt2$addData(d)
+pt2$addColumnDataGroups("agg_race")
+pt2$addRowDataGroups("assigned")
+pt2$addRowDataGroups("infected")
+pt2$defineCalculation(calculationName="Count", summariseExpression="n()")
+pt2$renderPivot()
+```
+
+# Intermediate Model 1: Infected
+
+```{r}
+infected_model_no_inter <- lm(targeted~assigned+infected, data=d)
+get_robust_se(infected_model_no_inter)
+```
+
+
+```{r}
+infected_model <- lm(targeted~assigned+infected+assigned*infected, data=d)
+get_robust_se(infected_model)
+```
+
+```{r}
+# Screenshot
+
+anova(infected_model_no_inter, infected_model, test="F")
+```
+
+
+```{r}
+infected_table <- d %>% group_by(assigned, infected) %>%
+    summarise(n = n(),
+              avg = mean(targeted),
+              sd_sq_over_n = sd(targeted)**2/n,
+              .groups = "keep") %>%
+  group_by(infected) %>%
+  summarise(Number_of_Participants = sum(n), 
+            CATE = diff(avg), 
+            Standard_Deviation = sqrt(sum(sd_sq_over_n))) %>% 
+  rename(Infected = infected)
+infected_table 
+```
+
+```{r}
+# Screenshot
+
+infected_table %>%
+  ggplot(aes(x = Infected, y = CATE)) + 
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = CATE - qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants), 
+                    ymax = CATE + qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants)),
+                         width=.2,
+                         position = position_dodge2(padding = 0.5)) +
+  xlab("Participant Infected by COVID") +
+  ylab("CATE") +
+  labs(title = "Heterogenous Treatment Effect from Infected by COVID")
+```
+
+# Intermediate Model 2: Race
+
+```{r}
+agg_race_model <- lm(targeted~assigned+agg_race+assigned*agg_race, data=d)
+get_robust_se(agg_race_model)
+```
+
+```{r}
+agg_race_model_no_inter <- lm(targeted~assigned+agg_race, data=d)
+get_robust_se(agg_race_model_no_inter)
+```
+
+```{r}
+# Screenshot
+
+race_table <- d %>% group_by(assigned, agg_race) %>%
+  summarise(avg = mean(targeted), 
+            n = n(),
+            sd_sq_over_n = sd(targeted)**2/n,
+            .groups = "keep") %>%
+  group_by(agg_race) %>%
+  summarise(Number_of_Participants = sum(n),
+            CATE = diff(avg),
+            Standard_Deviation = sqrt(sum(sd_sq_over_n)),
+            low_ci = CATE - qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants),
+            high_ci = CATE + qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants),
+            .groups = "keep") %>% 
+  rename(Race = agg_race)
+
+race_table
+  
+```
+
+```{r}
+# Screenshot
+
+race_table %>%
+  ggplot(aes(x = Race, y = CATE)) + 
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = CATE - qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants), 
+                    ymax = CATE + qnorm(0.975)*Standard_Deviation/sqrt(Number_of_Participants)),
+                         width=.2,
+                         position = position_dodge2(padding = 0.5)) +
+  xlab("Participant by Race") +
+  ylab("CATE") +
+  labs(title = "Heterogenous Treatment Effect by Race")
+```
+
+```{r}
+# Screenshot
+
+anova(agg_race_model_no_inter, agg_race_model, test="F")
+```
+
