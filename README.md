@@ -1,1 +1,3 @@
-# w241_final_project_asian_american_discrimination
+# W241 Final Project: Asian American Discrimination: COVID-19
+
+By: Irene Ju, Wesley Kwong, Jeff Zheng
